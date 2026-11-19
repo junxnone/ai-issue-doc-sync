@@ -7,7 +7,7 @@ description: 当用户想要完善/修改 docs/ 下某篇由 GitHub issue 同步
 
 ## 背景
 
-`docs/NNNN_Title.md`（`NNNN` 是 4 位 issue 编号）由 [.github/workflows/sync_issues.yml](../../.github/workflows/sync_issues.yml) 在 issue `opened`/`edited`/`labeled` 时，通过第三方 action `junxnone/wiki_issue2md@main` 自动从对应 GitHub issue 生成，并在 `docs/bk/` 写一份格式化备份，再由 `junxnone/autosidebar@main` 重建 `_sidebar.md`。
+`docs/NNNN_Title.md`（`NNNN` 是 4 位 issue 编号）由 [.github/workflows/sync_issues.yml](../../../.github/workflows/sync_issues.yml) 在 issue `opened`/`edited`/`labeled` 时，通过第三方 action `junxnone/wiki_issue2md@main` 自动从对应 GitHub issue 生成，并在 `docs/bk/` 写一份格式化备份，再由 `junxnone/autosidebar@main` 重建 `_sidebar.md`。
 
 **这是单向同步：issue → repo。没有反向同步。** 直接编辑 `docs/*.md` 的内容部分是无效的——下次该 issue 被编辑时会被覆盖。所有内容完善/新增都必须通过编辑或创建 GitHub issue 来完成，让现有 workflow 把结果同步回 repo。
 
@@ -40,6 +40,35 @@ description: 当用户想要完善/修改 docs/ 下某篇由 GitHub issue 同步
    ```
    这个目录只放草稿文件、不会被提交；`.gitignore` 里没有对应规则时自动补一行。
 
+## 公共约束（模式 A、B 都必须遵守）
+
+### 不使用多 agent 模式
+
+整个流程（拉取 issue、改写/撰写正文、diff 预览、写回/创建 issue、收尾同步）都由当前会话独立完成：不调用任何 Agent / fork / Workflow 类工具，长文章也不拆给多个 agent 并行写，正文由当前会话顺序完成。
+
+### 公式书写
+
+正文（改写或新增）中的数学公式一律使用 GitHub 支持的 LaTeX 语法，不要用纯文本、Unicode 拼凑或图片：
+
+- 行内公式：`$...$`，例如 `$E = mc^2$`。
+- 独立公式块：`$$...$$` 单独成段（前后各空一行），或使用 ` ```math ` 代码块。
+- 行内公式含 `_`、`\`、`*` 等易被 Markdown 先行解析的字符时，用 `` $`...`$ `` 形式（美元号内侧包反引号，如 `` $`a_b^2`$ ``），或改在 `$$` / ` ```math ` 块中书写。
+- 正文里要出现字面美元符号（如价格）时写成 `\$`，避免被误识别为公式起止。
+- 只使用 GitHub MathJax 支持的命令；不确定的写法用更基础的等价写法。
+- 改写已有正文时，如遇不符合上述格式的公式，一并改为 GitHub LaTeX 格式。
+
+### 正文落盘方式
+
+正文含大量 `$`、`\`，**不要**把它放进 shell 变量再 `printf`/`echo`（`$x`、`\n` 会被展开或吃掉，公式被破坏）。一律用带引号的 heredoc 直接写文件：
+
+```bash
+cat > "$TMPDIR/xxx.md" <<'EOF'
+……正文原文……
+EOF
+```
+
+后续 diff 预览、`--body-file` 提交都直接用这个文件。
+
 ## 模式 A：完善已有文档
 
 1. **解析 issue 编号**：接受 issue 编号（如 `531`）或文件名（如 `0531_Tools_OV_OPs_GPUImpl.md`）。文件名取前 4 位数字、去掉前导零得到编号 `N`。
@@ -50,12 +79,14 @@ description: 当用户想要完善/修改 docs/ 下某篇由 GitHub issue 同步
    ```
    这里的 `body` 才是要编辑的内容；不要去读 `docs/*.md` 里的 front matter 当作待编辑内容。
 
-3. **结合用户诉求改写正文**：在对话中生成新的 Markdown body。
+3. **结合用户诉求改写正文**：在对话中生成新的 Markdown body（公式遵守「公共约束」中的公式书写规则）。
 
 4. **编辑前确认**：
    ```bash
-   printf '%s' "$OLD_BODY" > "$TMPDIR/N_old.md"
-   printf '%s' "$NEW_BODY" > "$TMPDIR/N_new.md"
+   "$GH" issue view N --repo "$REPO" --json body -q .body > "$TMPDIR/N_old.md"
+   cat > "$TMPDIR/N_new.md" <<'EOF'
+   ……新正文……
+   EOF
    diff -u "$TMPDIR/N_old.md" "$TMPDIR/N_new.md"
    ```
    - 把 `diff -u` 的输出用 ` ```diff ` 代码块贴出来，直观展示增删。
@@ -65,19 +96,21 @@ description: 当用户想要完善/修改 docs/ 下某篇由 GitHub issue 同步
 
 5. **写回 issue**（用户确认后）：
    ```bash
-   printf '%s' "$NEW_BODY" > /tmp/issue_body.md
-   "$GH" issue edit N --repo "$REPO" --body-file /tmp/issue_body.md
+   "$GH" issue edit N --repo "$REPO" --body-file "$TMPDIR/N_new.md"
    ```
+   提交完成后再删除临时文件（见上一步的收尾要求）。
 
 ## 模式 B：新增文章
 
 1. **收集标题/主题**：向用户确认文章标题（即未来 issue title，也是文件名 slug 的来源）和要覆盖的内容方向。
 
-2. **生成正文草稿**：按用户诉求撰写 Markdown 正文。不要手写 front matter 表格，sync 时会自动生成。
+2. **生成正文草稿**：按用户诉求撰写 Markdown 正文。不要手写 front matter 表格，sync 时会自动生成。公式遵守「公共约束」中的公式书写规则。
 
 3. **创建前确认**：全新内容没有旧版本可 diff，但同样需要能看到 Markdown 渲染效果：
    ```bash
-   printf '%s' "$NEW_BODY" > "$TMPDIR/draft_<slug>.md"
+   cat > "$TMPDIR/draft_<slug>.md" <<'EOF'
+   ……正文……
+   EOF
    ```
    - 把标题 + 正文全文贴在对话里，同时把 `$TMPDIR/draft_<slug>.md` 的相对路径作为 Markdown 链接发给用户，方便在编辑器里点开预览渲染效果。
    - 等待用户**明确确认**后才能继续。
@@ -85,10 +118,9 @@ description: 当用户想要完善/修改 docs/ 下某篇由 GitHub issue 同步
 
 4. **创建 issue**（用户确认后）：
    ```bash
-   printf '%s' "$NEW_BODY" > /tmp/issue_body.md
-   "$GH" issue create --repo "$REPO" --title "$TITLE" --body-file /tmp/issue_body.md
+   "$GH" issue create --repo "$REPO" --title "$TITLE" --body-file "$TMPDIR/draft_<slug>.md"
    ```
-   记录返回的新 issue 编号/URL。
+   记录返回的新 issue 编号/URL，之后删除草稿文件。
 
 ## 公共收尾（两种模式都要做）
 
